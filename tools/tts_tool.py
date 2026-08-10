@@ -216,8 +216,8 @@ DEFAULT_OPENAI_MODEL = "gpt-4o-mini-tts"
 # is rejected with a 400 "Unsupported managed OpenAI speech model", so it must be
 # coerced to a supported model when routing through the gateway.
 MANAGED_OPENAI_TTS_MODELS = frozenset({"gpt-4o-mini-tts"})
-DEFAULT_KITTENTTS_MODEL = "KittenML/kitten-tts-nano-0.8-int8"  # 25MB
-DEFAULT_KITTENTTS_VOICE = "Jasper"
+DEFAULT_KITTENTTS_MODEL = "KittenML/kitten-tts-nano-0.1"  # v0.1 pairs with PyPI kittentts 0.1.3; 0.8-int8 output is degenerate noise with it
+DEFAULT_KITTENTTS_VOICE = "expr-voice-2-m"  # must be a key in the model's voices.npz
 DEFAULT_PIPER_VOICE = "en_US-lessac-medium"  # balanced size/quality
 DEFAULT_OPENAI_VOICE = "alloy"
 DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
@@ -3068,6 +3068,24 @@ def _generate_piper_tts(text: str, output_path: str, tts_config: Dict[str, Any])
 _kittentts_model_cache: Dict[str, Any] = {}
 
 
+def _resolve_kittentts_model(model_ref: str) -> str:
+    """Resolve a KittenTTS model reference to a local .onnx path.
+
+    Accepts a local file path or an HF repo id (e.g.
+    ``KittenML/kitten-tts-nano-0.8-int8``). Repo ids are resolved to the
+    repo's first ``.onnx`` file via :func:`huggingface_hub.hf_hub_download`,
+    which caches the download for subsequent calls.
+    """
+    if os.path.isfile(model_ref):
+        return model_ref
+    from huggingface_hub import hf_hub_download, list_repo_files  # lazy: keep TTS imports light
+
+    onnx_files = [f for f in list_repo_files(model_ref) if f.endswith(".onnx")]
+    if not onnx_files:
+        raise FileNotFoundError(f"No .onnx model found in HF repo {model_ref!r}")
+    return hf_hub_download(model_ref, onnx_files[0])
+
+
 def _generate_kittentts(text: str, output_path: str, tts_config: Dict[str, Any]) -> str:
     """Generate speech using KittenTTS local ONNX model.
 
@@ -3087,19 +3105,18 @@ def _generate_kittentts(text: str, output_path: str, tts_config: Dict[str, Any])
     model_name = kt_config.get("model", DEFAULT_KITTENTTS_MODEL)
     voice = kt_config.get("voice", DEFAULT_KITTENTTS_VOICE)
     speed = kt_config.get("speed", 1.0)
-    clean_text = kt_config.get("clean_text", True)
 
     # Use cached model instance if available
     def _load_kittentts_model():
         logger.info("[KittenTTS] Loading model: %s", model_name)
-        m = KittenTTS(model_name)
+        m = KittenTTS(_resolve_kittentts_model(model_name))
         logger.info("[KittenTTS] Model loaded successfully")
         return m
 
     model = _tts_cache_get_or_load(_kittentts_model_cache, model_name, _load_kittentts_model)
 
     # Generate audio (returns numpy array at 24kHz)
-    audio = model.generate(text, voice=voice, speed=speed, clean_text=clean_text)
+    audio = model.generate(text, voice=voice, speed=speed)
 
     # Save as WAV
     import soundfile as sf

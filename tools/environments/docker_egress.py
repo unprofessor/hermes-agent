@@ -11,6 +11,8 @@ import hashlib
 import json
 import logging
 
+from tools.environments.path_utils import bind_mount_args
+
 logger = logging.getLogger("tools.environments.docker")
 
 _EGRESS_LABEL_KEY = "hermes-egress"
@@ -75,7 +77,7 @@ def _egress_proxy_args_for_docker() -> tuple[list[str], dict[str, str], list[str
             "corrupt.  Re-run `hermes egress setup` to mint provider "
             "tokens before starting a sandbox.")
 
-    volume_args = ["-v", f"{status.ca_cert_path}:{_CONTAINER_CA}:ro"]
+    volume_args = bind_mount_args(status.ca_cert_path, _CONTAINER_CA, readonly=True)
 
     # tunnel_port serves CONNECT (HTTPS); the plain-HTTP forward listener is on +1.
     proxy_url = f"http://host.docker.internal:{status.tunnel_port}"

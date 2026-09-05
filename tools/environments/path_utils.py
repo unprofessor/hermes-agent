@@ -32,3 +32,18 @@ def sanitize_task_id_for_path(task_id: str) -> str:
     digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:_SANDBOX_DIR_HASH_LEN]
     stem = cleaned[: _SANDBOX_DIR_MAX_LEN - _SANDBOX_DIR_HASH_LEN - 1].strip("._")
     return f"{stem or 'task'}-{digest}"
+
+
+def bind_mount_args(src: str, dst: str, *, readonly: bool = False) -> list[str]:
+    """``--mount`` args for a bind mount the caller derived itself (sandbox dirs, host cwd,
+    credential and CA files). The short ``-v src:dst`` form splits on ``:``, so any colon in *src* —
+    a ``TERMINAL_SANDBOX_DIR`` or host cwd containing one — is read as an extra spec field and the
+    run dies with exit 125. :func:`sanitize_task_id_for_path` only covers the task-id path segment,
+    not the rest of the path.
+
+    Long-form parsing splits on ``,`` instead, so *src* must not contain a comma; callers pass
+    derived paths. A user-authored ``-v`` spec stays in the short form — the user owns the whole
+    string there, where a bare ``:`` is a separator rather than data.
+    """
+    spec = f"type=bind,src={src},dst={dst}"
+    return ["--mount", f"{spec},readonly" if readonly else spec]

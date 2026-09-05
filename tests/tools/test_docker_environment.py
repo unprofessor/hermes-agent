@@ -99,8 +99,7 @@ def test_auto_mount_host_cwd_adds_volume(monkeypatch, tmp_path):
     # Find the docker run call and check its args
     run_calls = [c for c in calls if isinstance(c[0], list) and len(c[0]) >= 2 and c[0][1] == "run"]
     assert run_calls, "docker run should have been called"
-    run_args_str = " ".join(run_calls[0][0])
-    assert f"{project_dir}:/workspace" in run_args_str
+    assert f"{project_dir}:/workspace" in _bind_mount_specs(run_calls[0][0])
 
 
 def test_non_persistent_cleanup_removes_container(monkeypatch):
@@ -634,12 +633,24 @@ def test_run_command_sanitizes_unsafe_task_id(monkeypatch):
 
 
 def _bind_mount_specs(run_args):
-    """Return every spec string passed via ``-v``."""
-    return [
-        run_args[i + 1]
-        for i, flag in enumerate(run_args[:-1])
-        if flag == "-v"
-    ]
+    """Every bind mount as a ``src:dst[:ro]`` string, from either flag form.
+
+    Hermes-derived mounts use long-form ``--mount`` (a colon in the source would
+    otherwise be read as a spec separator); a user-authored volume stays as ``-v``.
+    Both are normalised here so assertions can talk about source and target alone.
+    """
+    specs = []
+    for i, flag in enumerate(run_args[:-1]):
+        value = run_args[i + 1]
+        if flag == "-v":
+            specs.append(value)
+        elif flag == "--mount":
+            fields = dict(
+                part.split("=", 1) for part in value.split(",") if "=" in part
+            )
+            spec = f"{fields.get('src', '')}:{fields.get('dst', '')}"
+            specs.append(f"{spec}:ro" if "readonly" in value.split(",") else spec)
+    return specs
 
 
 def test_persistent_bind_mounts_survive_a_session_key_task_id(monkeypatch, tmp_path):
@@ -669,6 +680,56 @@ def test_persistent_bind_mounts_survive_a_session_key_task_id(monkeypatch, tmp_p
         # Docker splits on ':' — a sane spec has exactly source:target.
         assert spec.count(":") == 1, f"spec is not a two-field bind: {spec}"
         assert target in {"/root", "/workspace"}
+
+
+def test_colon_in_sandbox_base_path_still_yields_a_valid_bind(monkeypatch, tmp_path):
+    """``sanitize_task_id_for_path`` scrubs the task-id segment only. A colon anywhere
+    else in the sandbox root — ``TERMINAL_SANDBOX_DIR`` on a mount like ``/mnt/a:b`` —
+    still reaches the bind spec, where short-form ``-v`` reads it as another field and
+    docker exits 125. The long ``--mount`` form splits on ``,`` instead, so the source
+    survives whole."""
+    base = tmp_path / "a:b" / "sandboxes"
+    base.mkdir(parents=True)
+    monkeypatch.setenv("TERMINAL_SANDBOX_DIR", str(base))
+    monkeypatch.setattr(docker_env, "find_docker", lambda: "/usr/bin/docker")
+    calls = _mock_subprocess_run(monkeypatch)
+
+    _make_dummy_env(task_id="plain-task-id", persistent_filesystem=True)
+
+    run_args = _run_args_from_calls(calls)
+    assert "-v" not in run_args, (
+        "a Hermes-derived bind must not use short-form -v; a colon in the sandbox "
+        f"base would be read as a spec separator: {run_args}"
+    )
+    specs = _bind_mount_specs(run_args)
+    mounts = [s for s in specs if s.endswith((":/root", ":/workspace"))]
+    assert len(mounts) == 2, f"expected /root and /workspace binds; got {specs}"
+    for spec in mounts:
+        source, _, target = spec.rpartition(":")
+        assert source.startswith(str(base)), f"bind source was truncated: {spec}"
+        assert "a:b" in source, f"colon-bearing base path did not survive: {spec}"
+        assert target in {"/root", "/workspace"}
+
+
+def test_colon_in_host_cwd_still_yields_a_valid_bind(monkeypatch, tmp_path):
+    """Same exposure on the auto-mounted host cwd: the user's own directory may
+    contain a colon, and it is never routed through the task-id sanitizer."""
+    project_dir = tmp_path / "weird:name"
+    project_dir.mkdir()
+    monkeypatch.setattr(docker_env, "find_docker", lambda: "/usr/bin/docker")
+    calls = _mock_subprocess_run(monkeypatch)
+
+    _make_dummy_env(cwd="/workspace", host_cwd=str(project_dir), auto_mount_cwd=True)
+
+    run_args = _run_args_from_calls(calls)
+    assert "-v" not in run_args, (
+        "the auto-mounted host cwd must not use short-form -v; its colon would be "
+        f"read as a spec separator: {run_args}"
+    )
+    specs = _bind_mount_specs(run_args)
+    assert f"{project_dir}:/workspace" in specs, (
+        f"colon-bearing host cwd did not survive into the bind spec: {specs}"
+    )
 
 
 def test_distinct_session_keys_get_distinct_sandbox_dirs(monkeypatch, tmp_path):

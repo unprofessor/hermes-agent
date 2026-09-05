@@ -28,7 +28,7 @@ from tools.environments.docker_egress import (
     _egress_reuse_fingerprint, check_docker_env_collisions, check_extra_args_collisions,
     check_forward_env_collisions, merge_egress_env,
 )
-from tools.environments.path_utils import sanitize_task_id_for_path
+from tools.environments.path_utils import bind_mount_args as _bind_mount_args, sanitize_task_id_for_path
 from tools.environments.remote_common import (
     bash_argv, client_env_with, load_hermes_env_vars, prepend_unset, resolve_passthrough_env, run_capture)
 
@@ -441,7 +441,8 @@ _RO_MOUNT_SOURCES = (
 
 
 def _readonly_skill_mount_args() -> list[str]:
-    """``-v host:container:ro`` args for credential files, skill dirs and cache dirs. Read-only so the
+    """``--mount type=bind,...,readonly`` args for credential files, skill dirs and cache dirs. Read-only
+    so the
     container can authenticate/read but never modify host state. Missing or wrong-kind sources are
     skipped with a warning (Docker-in-Docker auto-creates a missing file source as a directory,
     which would exit 125)."""
@@ -459,7 +460,7 @@ def _readonly_skill_mount_args() -> list[str]:
                 if problem:
                     logger.warning("Docker: skipping %s mount — %s: %s", noun.split()[0], problem, src)
                     continue
-                args.extend(["-v", f"{entry['host_path']}:{entry['container_path']}:ro"])
+                args.extend(_bind_mount_args(entry["host_path"], entry["container_path"], readonly=True))
                 logger.info("Docker: mounting %s %s -> %s", noun, entry["host_path"], entry["container_path"])
     except Exception as e:
         logger.debug("Docker: could not load credential file mounts: %s", e)
@@ -697,18 +698,18 @@ class DockerEnvironment(BaseEnvironment):
             sandbox = get_sandbox_dir() / "docker" / _sandbox_dir_name(task_id)
             self._home_dir = str(sandbox / "home")
             os.makedirs(self._home_dir, exist_ok=True)
-            writable_args += ["-v", f"{self._home_dir}:/root"]
+            writable_args += _bind_mount_args(self._home_dir, "/root")
             if mount_workspace:
                 self._workspace_dir = str(sandbox / "workspace")
                 os.makedirs(self._workspace_dir, exist_ok=True)
-                writable_args += ["-v", f"{self._workspace_dir}:/workspace"]
+                writable_args += _bind_mount_args(self._workspace_dir, "/workspace")
         else:
             writable_args += ["--tmpfs", "/workspace:rw,exec,size=10g"] if mount_workspace else []
             writable_args += ["--tmpfs", "/home:rw,exec,size=1g", "--tmpfs", "/root:rw,exec,size=1g"]
 
         if bind_host_cwd:
             logger.info("Mounting configured host cwd to /workspace: %s", host_cwd_abs)
-            volume_args = ["-v", f"{host_cwd_abs}:/workspace", *volume_args]
+            volume_args = [*_bind_mount_args(host_cwd_abs, "/workspace"), *volume_args]
         elif workspace_explicitly_mounted:
             logger.debug("Skipping docker cwd mount: /workspace already mounted by user config")
         return volume_args, writable_args
